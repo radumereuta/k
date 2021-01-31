@@ -47,7 +47,6 @@ import org.kframework.unparser.Formatter;
 import org.kframework.utils.StringUtil;
 import org.kframework.utils.errorsystem.KEMException;
 import org.kframework.utils.file.FileUtil;
-import scala.Int;
 import scala.Option;
 import scala.Tuple2;
 import scala.collection.JavaConverters;
@@ -435,7 +434,7 @@ public class ModuleToKORE {
             throw KEMException.compilerError("Found an associative production with ill formed sorts", prod);
         }
         sb.append("  axiom");
-        convertParams(prod.klabel(), true, sb);
+        convertParams(sb, true, prod.klabel());
         sb.append(" \\equals{");
         convert(prod.sort(), prod, sb);
         sb.append(", R} (");
@@ -471,7 +470,7 @@ public class ModuleToKORE {
         }
         Sort childSort = prod.nonterminal(0).sort();
         sb.append("  axiom");
-        convertParams(prod.klabel(), true, sb);
+        convertParams(sb, true, prod.klabel());
         sb.append(" \\equals{");
         convert(prod.sort(), prod, sb);
         sb.append(", R} (");
@@ -498,7 +497,7 @@ public class ModuleToKORE {
             throw KEMException.compilerError("Found an associative production with ill formed sorts", prod);
         }
         sb.append("  axiom");
-        convertParams(prod.klabel(), true, sb);
+        convertParams(sb, true, prod.klabel());
         sb.append(" \\equals{");
         convert(prod.sort(), prod, sb);
         sb.append(", R} (");
@@ -523,7 +522,7 @@ public class ModuleToKORE {
         }
         KLabel unit = KLabel(prod.att().get(Att.UNIT()));
         sb.append("  axiom");
-        convertParams(prod.klabel(), true, sb);
+        convertParams(sb, true, prod.klabel());
         sb.append("\\equals{");
         convert(prod.sort(), prod, sb);
         sb.append(", R} (");
@@ -537,7 +536,7 @@ public class ModuleToKORE {
         sb.append(") [unit{}()] // right unit\n");
 
         sb.append("  axiom");
-        convertParams(prod.klabel(), true, sb);
+        convertParams(sb, true, prod.klabel());
         sb.append("\\equals{");
         convert(prod.sort(), prod, sb);
         sb.append(", R} (");
@@ -635,7 +634,7 @@ public class ModuleToKORE {
         // c(x1,x2,...) /\ c(y1,y2,...) -> c(x1/\y2,x2/\y2,...)
         if (prod.arity() > 0) {
             sb.append("  axiom");
-            convertParams(prod.klabel(), false, sb);
+            convertParams(sb, false, prod.klabel());
             sb.append("\\implies{");
             convert(prod.sort(), prod, sb);
             sb.append("} (\\and{");
@@ -671,7 +670,7 @@ public class ModuleToKORE {
             noConfusion.add(Tuple2.apply(prod, prod2));
             noConfusion.add(Tuple2.apply(prod2, prod));
             sb.append("  axiom");
-            convertParams(prod.klabel(), false, sb);
+            convertParams(sb, false, prod.klabel(), prod2.klabel());
             sb.append("\\not{");
             convert(prod.sort(), prod, sb);
             sb.append("} (\\and{");
@@ -1343,7 +1342,7 @@ public class ModuleToKORE {
 
     private void functionalPattern(Production prod, Runnable functionPattern, StringBuilder sb) {
         sb.append("  axiom");
-        convertParams(prod.klabel(), true, sb);
+        convertParams(sb, true, prod.klabel());
         sb.append(" \\exists{R} (Val:");
         convert(prod.sort(), prod, sb);
         sb.append(", \\equals{");
@@ -1383,17 +1382,25 @@ public class ModuleToKORE {
         }
     }
 
-    private void convertParams(Option<KLabel> maybeKLabel, boolean hasR, StringBuilder sb) {
+    private void convertParams(StringBuilder sb, boolean hasR, Option<KLabel> ... maybeKLabel) {
         sb.append("{");
+        List<KLabel> kls = new ArrayList<>();
+        for (Option<KLabel> mkl : maybeKLabel) {
+            if (mkl.isDefined()) {
+                kls.add(mkl.get());
+            }
+        }
+
         String conn = "";
         if (hasR) {
             sb.append("R");
-            if (maybeKLabel.isDefined()) {
+            if (!kls.isEmpty()) {
                 conn = ", ";
             }
         }
-        if (maybeKLabel.isDefined()) {
-            for (Sort param : iterable(maybeKLabel.get().params())) {
+        if (!kls.isEmpty()) {
+            // combine the parametric sorts from all the parameters and add them
+            for (Sort param : kls.stream().flatMap(x -> mutable(x.params()).stream()).collect(Collectors.toList())) {
                 sb.append(conn);
                 convert(param, Seq(param), sb);
                 conn = ", ";
