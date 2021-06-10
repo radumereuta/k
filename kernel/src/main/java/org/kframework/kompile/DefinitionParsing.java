@@ -426,7 +426,9 @@ public class DefinitionParsing {
                     if (stream(m.localSentences()).noneMatch(s -> s instanceof Bubble))
                         return;
                     pimsFutures.add(executor.submit(() -> {
-                        ParseInModule pim = RuleGrammarGenerator.getCombinedGrammar(gen.getRuleGrammar(m), scanner, isStrict, profileRules, false, files);
+                        ParseInModule pim = gen.getRuleGrammar(m).name().equals(scannerpim.seedModule().name()) ?
+                                scannerpim :
+                                RuleGrammarGenerator.getCombinedGrammar(gen.getRuleGrammar(m), scanner, isStrict, profileRules, false, files);
                         pim.initialize();
                         ParseCache cache = loadCache(pim.seedModule());
 
@@ -447,12 +449,13 @@ public class DefinitionParsing {
         List<ParseInModule> pims = new ArrayList<>();
         Multimap<String, Sentence> parsedSentences = ArrayListMultimap.create();
         try {
-            // wait for all parsers to finish initializing
+            // wait for all scanners to finish building
             for (Future<ParseInModule> fpim : scannersFutures)
                 pims.add(fpim.get());
+            // wait for all parsers to finish initializing
             for (Future<ParseInModule> fpim : pimsFutures)
                 pims.add(fpim.get());
-            // wait for all bubble parsing to finish
+            // wait for all bubbles to finish parsing
             for (Future<Stream<Tuple2<String, Sentence>>> fstream : bubbleFutures)
                 fstream.get().forEach(tuple -> parsedSentences.put(tuple._1(), tuple._2()));
         } catch (InterruptedException | ExecutionException e) {
