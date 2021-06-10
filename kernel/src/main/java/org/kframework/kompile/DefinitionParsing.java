@@ -47,10 +47,17 @@ import scala.collection.Set;
 import scala.util.Either;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -283,36 +290,63 @@ public class DefinitionParsing {
         Definition defWithCaches = resolveCachedBubbles(def, false);
         RuleGrammarGenerator gen = new RuleGrammarGenerator(def);
 
-        // parse config bubbles in parallel
-        // step 1 - use scala parallel streams to generate parsers
-        // step 2 - use java parallel streams to parse sentences
-        // this avoids creation of extra (costly) threads at the cost
-        // of a small thread contention between the two thread pools
-        Map<String, Module> parsed = defWithCaches.parMap(m -> {
-            if (stream(m.localSentences()).noneMatch(s -> s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration)))
-                return m;
-            Module configParserModule = gen.getConfigGrammar(m);
-            ParseCache cache = loadCache(configParserModule);
-            try (ParseInModule parser = RuleGrammarGenerator.getCombinedGrammar(cache.getModule(), isStrict, profileRules, files)) {
-                // each parser gets its own scanner because config labels can conflict with user tokens
-                parser.getScanner(options.global);
-                parser.initialize();
+        ExecutorService executor = ForkJoinPool.commonPool();
 
-                java.util.Set<Sentence> parsedSet = stream(m.localSentences())
-                        .filter(s -> s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration))
-                        .map(b -> (Bubble) b)
-                        .parallel()
-                        .flatMap(b -> parseBubble(parser, cache.getCache(), b)
-                                .map(p -> upSentence(p, b.sentenceType())))
-                        .collect(Collectors.toSet());
-                Set<Sentence> allSent = m.localSentences().$bar(immutable(parsedSet)).filter(s -> !(s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration))).seq();
-                return Module(m.name(), m.imports(), allSent, m.att());
-            }
-        });
+        // create a list of tasks that initializes parsers
+        Deque<Future<Stream<Tuple2<String, Sentence>>>> bubbleFutures = new ConcurrentLinkedDeque<>();
+        List<Future<ParseInModule>> pimsFutures = stream(defWithCaches.modules())
+                .filter(m -> stream(m.localSentences()).anyMatch(s -> s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration)))
+                .map(m -> {
+                    Module configParserModule = gen.getConfigGrammar(m);
+                    ParseCache cache = loadCache(configParserModule);
+                    ParseInModule pim = RuleGrammarGenerator.getCombinedGrammar(cache.getModule(), isStrict, profileRules, files);
+                    // each parser gets its own scanner because config labels can conflict with user tokens
+                    return executor.submit(() -> {
+                        // put every parser and scanner creation in it's own thread
+                        pim.getScanner(options.global);
+                        pim.initialize();
 
-        Definition defWithParsedConfigs = DefinitionTransformer.from(m ->
-                Module(m.name(), m.imports(), parsed.get(m.name()).localSentences(), m.att()),
-                "replace configs").apply(defWithCaches);
+                        bubbleFutures.addAll(stream(m.localSentences())
+                                .filter(s -> s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration))
+                                .map(b -> (Bubble) b)
+                                .map(b -> executor.submit(() ->
+                                            // once the parser is ready create new tasks for each bubble
+                                            parseBubble(pim, cache.getCache(), b)
+                                                    .map(p -> new Tuple2<>(m.name(), upSentence(p, b.sentenceType()))))
+                                ).collect(Collectors.toList()));
+                        return pim;
+                    });
+                }).collect(Collectors.toList());
+
+        List<ParseInModule> pims = new ArrayList<>();
+        Stream<Tuple2<String, Sentence>> parses = Stream.of();
+        try {
+            // wait for all parsers to finish initializing
+            for (Future<ParseInModule> fpim : pimsFutures)
+                pims.add(fpim.get());
+            // wait for all bubble parsing to finish
+            for (Future<Stream<Tuple2<String, Sentence>>> fstream : bubbleFutures)
+                parses = Stream.concat(parses, fstream.get());
+        } catch (InterruptedException | ExecutionException e) {
+            Throwable th = e;
+            while (!(th instanceof KEMException)) // TODO check for other exceptions? or just remove the two execution types
+                th = th.getCause();
+            throw (KEMException) th;
+        } finally {
+            for (ParseInModule pim : pims)
+                pim.close();
+        }
+        Map<String, java.util.Set<Sentence>> parseMap = parses.collect(Collectors.groupingBy(Tuple2::_1, Collectors.mapping(Tuple2::_2, Collectors.toSet())));
+
+        Definition defWithParsedConfigs = DefinitionTransformer.from(m -> {
+                    if (stream(m.localSentences()).noneMatch(s -> s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration)))
+                        return m;
+                    Set<Sentence> configs = stream((Set<Sentence>) m.localSentences()
+                            .$bar(immutable(parseMap.get(m.name()))))
+                            .filter(s -> !(s instanceof Bubble && ((Bubble) s).sentenceType().equals(configuration)))
+                            .collect(toSet());
+                    return Module(m.name(), m.imports(), configs, m.att());
+                }, "replace configs").apply(defWithCaches);
 
         // replace config bubbles with the generated syntax and rules
         return DefinitionTransformer.from(m -> {
